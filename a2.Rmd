@@ -1,0 +1,194 @@
+---
+title: "Assignment 2"
+output: html_document
+---
+
+
+## First load packages needed in this assignment
+
+```{r,echo=TRUE,message=FALSE}
+
+# load needed libraries
+library(GEOmetadb)
+library(edgeR)
+library(biomaRt)
+library(tidyr)
+library(dplyr)
+library(ComplexHeatmap)
+library(circlize)
+library(GEOquery)
+
+```
+
+
+# INTRODUCTION  
+The dataset is from [GEO GSE107637](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE107637)[@HDAC_2017], and selects one of several treatment analysis in this paper. This paper corresponds to the GEO dataset with ID GSE107637. 
+RUVBL1 and RUVBL2 (collectively RUVBL1/2) are essential AAA+ ATPases that function as co-chaperones and have been implicated in cancer. Here we investigated the molecular and phenotypic role of RUVBL1/2 ATPase activity in non-small cell lung cancer (NSCLC). We find that RUVBL1/2 are overexpressed in NSCLC patient tumors, with high expression prognostic of poor survival. Utilizing a highly specific inhibitor of RUVBL1/2 ATPase activity, we show that RUVBL1/2 ATPase activity is necessary for the maturation of the PAQosome, a large RUVBL1/2-dependent multiprotein complex. We also show that RUVBL1/2 have roles in DNA replication, as inhibition of their ATPase activity impedes RPA loading at replication forks, decreases fork stability, and ultimately results in replication catastrophe and cancer cell death. While in vivo pharmacological inhibition of RUVBL1/2 results in modest antitumor activity, it synergizes with radiation in NSCLC, but not normal cells, an attractive property for future preclinical development.
+
+
+## Data preparation
+```{r,message=FALSE, echo=TRUE}
+sfiles = getGEOSuppFiles('GSE107637')
+fnames = rownames(sfiles)
+ca_exp = read.delim(fnames[1],header=TRUE,check.names = FALSE)
+```     
+
+```{r}
+read.table(fnames[1],header=TRUE,check.names=FALSE,nrows = 1)[1,1:13]
+```    
+
+```{r}
+read.table(fnames[1],header=TRUE,check.names=TRUE,nrows = 1)[1,1:13]
+```      
+
+```{r}
+samples <- data.frame(lapply(colnames(ca_exp)[2:13],                           FUN=function(x){unlist(strsplit(x, split = "\\_"))[c(1,2)]}))
+```        
+
+```{r}
+colnames(samples)<- colnames(ca_exp)[2:13]
+```      
+
+```{r}
+rownames(samples) <- c("cell_type", "inhibition")
+```      
+
+```{r}
+samples <- data.frame(t(samples))
+samples
+```      
+
+```{r}
+summarized_gene_counts <- sort(table(ca_exp$Gene),decreasing = TRUE)
+```      
+
+```{r}
+#translate out counts into counts per million using the edgeR package function cpm
+cpms = cpm(ca_exp[,2:13])
+# get rid of low counts
+rownames(cpms) <- ca_exp[,1]
+head(cpms)
+```      
+
+```{r}
+keep = rowSums(cpms >1) >=3
+ca_exp_filtered = ca_exp[keep,]
+```    
+
+```{r}
+#Create an edgeR container for DNASeq count data
+filtered_data_matrix <- as.matrix(ca_exp_filtered[,2:13])
+rownames(filtered_data_matrix) <- ca_exp_filtered$Gene
+```    
+
+```{r}
+d = DGEList(counts=filtered_data_matrix, group=samples$cell_type)
+# Calculate the normalization factors
+d = calcNormFactors(d)
+#get the normalized data
+normalized_counts <- cpm(d)
+counts_density <- apply(log2(normalized_counts), 2, density)
+
+# A MDS plot represents the distances between samples
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$cell_type)])
+
+#estimate common and tagwise dispersion
+model_design <- model.matrix(~samples$cell_type + samples$inhibition+0)
+d <- estimateDisp(d, model_design)
+head(d)
+
+# Graphing the BCV
+plotBCV(d,col.tagwise = "black",col.common = "red")
+
+# Create a visual representation of the mean-variance relationship
+plotMeanVar(d, show.raw.vars = TRUE,
+            show.tagwise.vars=FALSE, NBline=FALSE, 
+            show.ave.raw.vars = FALSE,show.binned.common.disp.vars = FALSE)
+
+
+plotMeanVar(d, show.raw.vars = TRUE,show.tagwise.vars=TRUE,
+            NBline=FALSE, show.ave.raw.vars = FALSE,
+            show.binned.common.disp.vars = FALSE)
+
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars=TRUE, 
+            show.ave.raw.vars = TRUE,NBline=FALSE,
+            show.binned.common.disp.vars = FALSE)
+
+
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars=TRUE, 
+            show.ave.raw.vars = TRUE,  NBline=FALSE, 
+            show.binned.common.disp.vars = TRUE)
+
+plotMeanVar(d, show.raw.vars = TRUE, show.tagwise.vars=TRUE, 
+            show.ave.raw.vars = TRUE, NBline=TRUE,
+            show.binned.common.disp.vars = TRUE)
+
+
+listMarts()
+listEnsemblArchives()[1:10,]
+#Connect to the desired mart
+ensembl <- useMart("ensembl")
+#Get the set of datasets available
+datasets <- listDatasets(ensembl)
+
+
+ensembl = useDataset("hsapiens_gene_ensembl",mart=ensembl)
+dim(listFilters(ensembl))
+
+
+# filter the human related data
+biomart_human_filters <- listFilters(ensembl)
+ 
+# HGNC symbols to Human Ensembl Gene Ids
+conversion_stash <- "ca_id_add_conversion.rds"
+if(file.exists(conversion_stash)){
+ca_id_add_conversion <- readRDS(conversion_stash)
+} else {
+ca_id_add_conversion <- getBM(attributes = c("hgnc_symbol","ensembl_gene_id"),
+filters = c("hgnc_symbol"),
+values = ca_exp_filtered$Gene,
+mart = ensembl)
+saveRDS(ca_id_add_conversion, conversion_stash)
+}
+
+# merge our new identifiers.
+normalized_counts_annot <- merge(ca_id_add_conversion,normalized_counts,by.x = 1, by.y = 0, all.y=TRUE)
+head(normalized_counts_annot)
+
+# find the mismatching gene
+ensembl_id_missing_gene <- normalized_counts_annot$hgnc_symbol[
+which(is.na(normalized_counts_annot$ensembl_gene_id))]
+head(ensembl_id_missing_gene)
+
+length(ensembl_id_missing_gene)
+ 
+old_mapping <- merge(ca_exp[,1:13],data.frame(ensembl_id_missing_gene),all.y = TRUE, by.x=1, by.y=1)
+head(old_mapping)
+```
+
+## Differential Gene Expression 
+
+**MAKE MDS PLOT TO SEE THE DISTANCE BETWEEN THE SAMPLES**  
+```{r}
+d <- estimateDisp(d, model_design)
+plotMDS(d, labels=rownames(samples),col = c("darkgreen","blue"))
+```
+
+
+### thhreshold over-representation analysis
+
+Which method did you choose and why?\
+What annotation data did you use and why? What version of the annotation are you using?\
+How many genesets were returned with what thresholds?\
+Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list?\
+Present your results with the use of tables and screenshots. All figures should have appropriate figure legends.
+If using figures create a figures directory in your repo and make sure all references to the figures are relative in your Rmarkdown notebook.\
+
+## Method and annotation data
+
+I used gprofiler, using the "gprofiler2" R package. I used this meta-database because it has a corresponding R package to fetch data, and we have gained familiarity with it in class. It contains the "GO:BP" dataset (Biological Process), which is the data source which I found most useful for understanding the effect of SAHA on the cell's biology. It returns the most results related to biological function/pathways. I used the p-value of 0.05 as the threshold for gene sets. \
+
+
+# References
+https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4670218/ # shows CPA4 upregulated upon HDAC treatment
